@@ -445,7 +445,36 @@ setInterval(async () => {
 // ====================================
 // DÉMARRER LE SERVEUR
 // ====================================
-
+// GET /api/voyages/:voyageId/current-position
+app.get('/api/voyages/:voyageId/current-position', async (req, res) => {
+  try {
+    const { voyageId } = req.params;
+    const voyageResult = await pool.query('SELECT * FROM voyages WHERE voyage_id = $1', [voyageId]);
+    if (voyageResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Voyage non trouvé' });
+    }
+    const voyage = voyageResult.rows[0];
+    const now = new Date();
+    const departureDate = new Date(voyage.departure_date);
+    const arrivalDate = new Date(voyage.arrival_date);
+    const totalMs = arrivalDate - departureDate;
+    const elapsedMs = now - departureDate;
+    const progress = Math.max(0, Math.min(1, elapsedMs / totalMs));
+    const currentLat = parseFloat(voyage.departure_lat) + (parseFloat(voyage.arrival_lat) - parseFloat(voyage.departure_lat)) * progress;
+    const currentLon = parseFloat(voyage.departure_lon) + (parseFloat(voyage.arrival_lon) - parseFloat(voyage.departure_lon)) * progress;
+    res.json({
+      success: true,
+      voyage_id: voyage.voyage_id,
+      tracking_id: voyage.tracking_id,
+      name: voyage.name,
+      current_position: { latitude: currentLat, longitude: currentLon, progress_percent: Math.round(progress * 100) },
+      departure: { port: voyage.departure_port, lat: voyage.departure_lat, lon: voyage.departure_lon, date: voyage.departure_date },
+      arrival: { port: voyage.arrival_port, lat: voyage.arrival_lat, lon: voyage.arrival_lon, date: voyage.arrival_date }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 const PORT = process.env.PORT || 5000;
 
 server.listen(PORT, () => {
