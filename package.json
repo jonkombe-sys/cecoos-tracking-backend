@@ -1,0 +1,34 @@
+{
+  "name": "cecoos-tracking-backend",
+  "version": "2.0.0",
+  "description": "Backend CECOOS Maritime Tracking - PostgreSQL + Express + Socket.io",
+  "main": "server-v2.js",
+  "scripts": {
+    "start": "node server-v2.js",
+    "dev": "nodemon server-v2.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "maritime",
+    "tracking",
+    "postgres",
+    "express",
+    "socket.io"
+  ],
+  "author": "CECOOS Team",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "pg": "^8.10.0",
+    "socket.io": "^4.7.2",
+    "body-parser": "^1.20.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
