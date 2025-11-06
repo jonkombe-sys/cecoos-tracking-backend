@@ -26,6 +26,7 @@ const io = socketIo(server, {
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use(express.static('public'));
 
 // ====================================
 // BASE DE DONNÉES
