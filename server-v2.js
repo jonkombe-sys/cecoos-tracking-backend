@@ -1,8 +1,9 @@
-// ====================================
+// =====================================
 // CECOOS TRACKING MARITIME - BACKEND V2
-// ====================================
+// =====================================
 // Technologie: Express.js + PostgreSQL
 // Fonctionnalités: API Voyages + Calcul position inversée
+// Route réaliste: Dar es Salaam → Shanghai avec waypoints
 
 const express = require('express');
 const cors = require('cors');
@@ -11,9 +12,9 @@ const { Pool } = require('pg');
 const http = require('http');
 const socketIo = require('socket.io');
 
-// ====================================
+// =====================================
 // CONFIGURATION
-// ====================================
+// =====================================
 
 dotenv.config();
 
@@ -25,12 +26,12 @@ const io = socketIo(server, {
 
 // Middleware
 app.use(cors());
-app.use(express.json());
 app.use(express.static('public'));
+app.use(express.json());
 
-// ====================================
+// =====================================
 // BASE DE DONNÉES
-// ====================================
+// =====================================
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || `postgresql://${process.env.DB_USER}:${process.env.DB_PASSWORD}@${process.env.DB_HOST}:${process.env.DB_PORT}/${process.env.DB_NAME}`
@@ -41,451 +42,321 @@ pool.on('error', (err) => {
   console.error('Erreur Pool PostgreSQL:', err);
 });
 
-// ====================================
+// =====================================
+// WAYPOINTS - Route réaliste maritime
+// =====================================
+
+const voyageWaypoints = {
+  'DAR-SHA': [
+    { name: "Dar es Salaam", lat: -6.80, lon: 39.28 },
+    { name: "Bab el-Mandeb", lat: 12.58, lon: 43.48 },
+    { name: "Golfe d'Aden", lat: 14.50, lon: 50.20 },
+    { name: "Détroit d'Ormuz", lat: 26.06, lon: 56.54 },
+    { name: "Golfe Persique", lat: 26.50, lon: 53.00 },
+    { name: "Mer d'Oman", lat: 21.00, lon: 58.00 },
+    { name: "Océan Indien", lat: 8.00, lon: 70.00 },
+    { name: "Détroit de Malacca", lat: 2.31, lon: 102.19 },
+    { name: "Mer de Chine", lat: 10.00, lon: 110.00 },
+    { name: "Shanghai", lat: 31.23, lon: 121.47 }
+  ]
+};
+
+// =====================================
 // FONCTIONS UTILITAIRES
-// ====================================
+// =====================================
 
 /**
- * Calculer la date de départ à partir de l'arrivée et la durée
+ * Interpole la position du navire entre les waypoints
+ * @param {number} progress - Progression (0 à 1)
+ * @param {array} waypoints - Liste des waypoints
+ * @returns {object} Position interpolée {latitude, longitude}
+ */
+function interpolatePosition(progress, waypoints) {
+  // Assure que progress est entre 0 et 1
+  progress = Math.max(0, Math.min(1, progress));
+
+  // Calcule l'index du segment actuel
+  const segmentIndex = progress * (waypoints.length - 1);
+  const currentSegment = Math.floor(segmentIndex);
+  const segmentProgress = segmentIndex - currentSegment;
+
+  // Si on a dépassé le dernier waypoint
+  if (currentSegment >= waypoints.length - 1) {
+    const lastPoint = waypoints[waypoints.length - 1];
+    return {
+      latitude: lastPoint.lat,
+      longitude: lastPoint.lon
+    };
+  }
+
+  // Interpolation linéaire entre deux waypoints
+  const start = waypoints[currentSegment];
+  const end = waypoints[currentSegment + 1];
+
+  return {
+    latitude: start.lat + (end.lat - start.lat) * segmentProgress,
+    longitude: start.lon + (end.lon - start.lon) * segmentProgress
+  };
+}
+
+/**
+ * Calcule la date de départ à partir de l'arrivée et la durée
  * @param {Date} dateArrivee - Date d'arrivée fixe
  * @param {number} dureesJours - Durée du voyage en jours (ex: 21.42 pour 21j10h)
  * @returns {Date} Date de départ calculée
  */
 function calculerDateDepart(dateArrivee, dureesJours) {
-  const arrivee = new Date(dateArrivee);
+  const arrive = new Date(dateArrivee);
   const dureesMs = dureesJours * 24 * 60 * 60 * 1000;
-  const depart = new Date(arrivee.getTime() - dureesMs);
+  const depart = new Date(arrive.getTime() - dureesMs);
   return depart;
 }
 
 /**
- * Calculer la progression actuelle du voyage (0 à 1)
+ * Calcule la progression actuelle du voyage (0 à 1)
  * @param {Date} dateDepart - Date de départ
  * @param {Date} dateArrivee - Date d'arrivée
  * @returns {number} Progression (0 à 1)
  */
 function calculerProgression(dateDepart, dateArrivee) {
-  const maintenant = new Date();
+  const now = new Date();
   const depart = new Date(dateDepart);
-  const arrivee = new Date(dateArrivee);
-  
-  // Si déjà arrivé
-  if (maintenant >= arrivee) {
-    return 1.0;
-  }
-  
-  // Si pas encore parti
-  if (maintenant <= depart) {
-    return 0.0;
-  }
-  
-  const tempsTotalMs = arrivee.getTime() - depart.getTime();
-  const tempsEcoulesMs = maintenant.getTime() - depart.getTime();
-  
-  return tempsEcoulesMs / tempsTotalMs;
+  const arrive = new Date(dateArrivee);
+
+  const totalMs = arrive.getTime() - depart.getTime();
+  const elapsedMs = now.getTime() - depart.getTime();
+
+  const progression = elapsedMs / totalMs;
+  return Math.max(0, Math.min(1, progression));
 }
 
-/**
- * Interpoler une position entre deux points GPS
- * Utilise la formule sphérique (grand-cercle)
- */
-function interpolerPosition(lat1, lon1, lat2, lon2, progression) {
-  // Convertir en radians
-  const φ1 = (lat1 * Math.PI) / 180;
-  const φ2 = (lat2 * Math.PI) / 180;
-  const Δλ = ((lon2 - lon1) * Math.PI) / 180;
-  
-  // Distance angulaire (formule haversine)
-  const a = Math.sin((φ2 - φ1) / 2) ** 2 + 
-            Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
-  const δ = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  
-  // Interpolation sphérique (SLERP)
-  const A = Math.sin((1 - progression) * δ) / Math.sin(δ);
-  const B = Math.sin(progression * δ) / Math.sin(δ);
-  
-  const x = A * Math.cos(φ1) * Math.cos(0) + 
-            B * Math.cos(φ2) * Math.cos(Δλ);
-  const y = A * Math.cos(φ1) * Math.sin(0) + 
-            B * Math.cos(φ2) * Math.sin(Δλ);
-  const z = A * Math.sin(φ1) + B * Math.sin(φ2);
-  
-  const φ = Math.atan2(z, Math.sqrt(x ** 2 + y ** 2));
-  const λ = Math.atan2(y, x);
-  
-  const latResult = (φ * 180) / Math.PI;
-  const lonResult = (λ * 180) / Math.PI;
-  
-  return { lat: latResult, lon: lonResult };
-}
+// =====================================
+// API ROUTES
+// =====================================
 
 /**
- * Calculer la position actuelle d'un voyage
+ * GET /api/voyage/current
+ * Récupère le voyage actuellement en cours avec position en temps réel
  */
-async function calculerPositionActuelle(voyageId) {
+app.get('/api/voyage/current', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT * FROM voyages WHERE voyage_id = $1`,
-      [voyageId]
+      `SELECT * FROM voyages WHERE departure_date <= NOW() AND arrival_date >= NOW() LIMIT 1`
     );
-    
+
     if (result.rows.length === 0) {
-      return null;
+      return res.json({
+        voyage: null,
+        message: "Pas de voyage en cours"
+      });
     }
-    
+
     const voyage = result.rows[0];
     const progression = calculerProgression(voyage.departure_date, voyage.arrival_date);
-    const position = interpolerPosition(
-      voyage.departure_lat,
-      voyage.departure_lon,
-      voyage.arrival_lat,
-      voyage.arrival_lon,
-      progression
-    );
-    
-    const distance_nm = voyage.distance_nm;
-    const distanceParcourue = distance_nm * progression;
-    const distanceRestante = distance_nm * (1 - progression);
-    
-    return {
-      voyage_id: voyageId,
-      timestamp: new Date().toISOString(),
-      position: position,
-      progression: Math.round(progression * 100) / 100,
-      progression_percent: Math.round(progression * 10000) / 100,
-      distance_parcourue: Math.round(distanceParcourue * 100) / 100,
-      distance_restante: Math.round(distanceRestante * 100) / 100,
-      distance_totale: voyage.distance_nm,
-      vitesse_noeuds: voyage.speed_knots,
-      status: progression >= 1.0 ? 'arrived' : (progression > 0 ? 'in_transit' : 'not_started'),
-      arrival_date: voyage.arrival_date,
-      eta: voyage.arrival_date
+    const waypoints = voyageWaypoints['DAR-SHA'];
+    const current_position = interpolatePosition(progression, waypoints);
+
+    // Récupère les infos de départ et arrivée
+    const departure = {
+      port: voyage.departure_port,
+      date: voyage.departure_date,
+      latitude: waypoints[0].lat,
+      longitude: waypoints[0].lon
     };
-  } catch (error) {
-    console.error('Erreur calcul position:', error);
-    return null;
-  }
-}
 
-// ====================================
-// ROUTES API
-// ====================================
+    const arrival = {
+      port: voyage.arrival_port,
+      date: voyage.arrival_date,
+      latitude: waypoints[waypoints.length - 1].lat,
+      longitude: waypoints[waypoints.length - 1].lon
+    };
 
-/**
- * GET /health
- * Vérifier que le serveur est en ligne
- */
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-/**
- * POST /api/voyages
- * Créer un nouveau voyage
- * Body:
- * {
- *   "name": "Dar es Salaam to Shanghai",
- *   "departure_port": "Dar es Salaam",
- *   "departure_lat": -6.8016,
- *   "departure_lon": 39.2948,
- *   "arrival_port": "Shanghai",
- *   "arrival_lat": 31.2304,
- *   "arrival_lon": 121.4737,
- *   "arrival_date": "2025-11-12T18:00:00Z",
- *   "duration_days": 21.42,
- *   "speed_knots": 14,
- *   "distance_nm": 7004
- * }
- */
-app.post('/api/voyages', async (req, res) => {
-  try {
-    const {
-      name,
-      departure_port,
-      departure_lat,
-      departure_lon,
-      arrival_port,
-      arrival_lat,
-      arrival_lon,
-      arrival_date,
-      duration_days,
-      speed_knots,
-      distance_nm
-    } = req.body;
-    
-    // Générer un ID unique
-    const voyage_id = `VOYAGE-${Date.now()}`;
-    const tracking_id = `CECOOS-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
-    
-    // Calculer la date de départ
-    const dateArrivee = new Date(arrival_date);
-    const dateDepart = calculerDateDepart(dateArrivee, duration_days);
-    
-    // Insérer dans la base de données
-    const result = await pool.query(
-      `INSERT INTO voyages 
-       (voyage_id, tracking_id, name, departure_port, departure_lat, departure_lon, 
-        arrival_port, arrival_lat, arrival_lon, departure_date, arrival_date, 
-        speed_knots, distance_nm, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-       RETURNING *`,
-      [
-        voyage_id,
-        tracking_id,
-        name,
-        departure_port,
-        departure_lat,
-        departure_lon,
-        arrival_port,
-        arrival_lat,
-        arrival_lon,
-        dateDepart,
-        dateArrivee,
-        speed_knots,
-        distance_nm,
-        'active'
-      ]
-    );
-    
-    res.status(201).json({
-      success: true,
-      message: 'Voyage créé avec succès',
+    res.json({
       voyage: {
-        voyage_id: result.rows[0].voyage_id,
-        tracking_id: result.rows[0].tracking_id,
-        name: result.rows[0].name,
-        departure_date: result.rows[0].departure_date,
-        arrival_date: result.rows[0].arrival_date,
-        status: result.rows[0].status
-      }
+        id: voyage.voyage_id,
+        name: voyage.voyage_name,
+        ship: voyage.ship_name
+      },
+      current_position,
+      progress: Math.round(progression * 100),
+      departure,
+      arrival
     });
-    
+
   } catch (error) {
-    console.error('Erreur création voyage:', error);
-    res.status(500).json({ error: 'Erreur lors de la création du voyage' });
+    console.error('Erreur API /voyage/current:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
 /**
  * GET /api/voyages
- * Récupérer tous les voyages actifs
+ * Récupère tous les voyages
  */
 app.get('/api/voyages', async (req, res) => {
   try {
-    const result = await pool.query(
-      `SELECT * FROM voyages WHERE status = 'active' ORDER BY departure_date DESC`
-    );
-    
-    res.json({
-      success: true,
-      count: result.rows.length,
-      voyages: result.rows
-    });
-    
+    const result = await pool.query('SELECT * FROM voyages ORDER BY departure_date DESC');
+    res.json(result.rows);
   } catch (error) {
-    console.error('Erreur récupération voyages:', error);
-    res.status(500).json({ error: 'Erreur lors de la récupération des voyages' });
+    console.error('Erreur API /voyages:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
 /**
- * GET /api/voyages/:voyage_id
- * Récupérer les détails d'un voyage
+ * POST /api/voyage
+ * Crée un nouveau voyage
  */
-app.get('/api/voyages/:voyage_id', async (req, res) => {
+app.post('/api/voyage', async (req, res) => {
   try {
-    const { voyage_id } = req.params;
-    
+    const {
+      voyage_name,
+      ship_name,
+      departure_port,
+      arrival_port,
+      arrival_date,
+      duration_days,
+      distance_nm
+    } = req.body;
+
+    const departure_date = calculerDateDepart(new Date(arrival_date), duration_days);
+
     const result = await pool.query(
-      `SELECT * FROM voyages WHERE voyage_id = $1`,
-      [voyage_id]
+      `INSERT INTO voyages 
+        (voyage_name, ship_name, departure_port, arrival_port, departure_date, arrival_date, distance_nm)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [voyage_name, ship_name, departure_port, arrival_port, departure_date, arrival_date, distance_nm]
     );
-    
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Erreur API POST /voyage:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/voyage/:id
+ * Récupère un voyage spécifique avec position en temps réel
+ */
+app.get('/api/voyage/:id', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM voyages WHERE voyage_id = $1',
+      [req.params.id]
+    );
+
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Voyage non trouvé' });
     }
-    
+
+    const voyage = result.rows[0];
+    const progression = calculerProgression(voyage.departure_date, voyage.arrival_date);
+    const waypoints = voyageWaypoints['DAR-SHA'];
+    const current_position = interpolatePosition(progression, waypoints);
+
     res.json({
-      success: true,
-      voyage: result.rows[0]
+      voyage,
+      current_position,
+      progress: Math.round(progression * 100)
     });
-    
+
   } catch (error) {
-    console.error('Erreur récupération voyage:', error);
-    res.status(500).json({ error: 'Erreur lors de la récupération du voyage' });
+    console.error('Erreur API /voyage/:id:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
 /**
- * GET /api/voyages/:voyage_id/position
- * Calculer et retourner la position actuelle d'un voyage
+ * DELETE /api/voyage/:id
+ * Supprime un voyage
  */
-app.get('/api/voyages/:voyage_id/position', async (req, res) => {
+app.delete('/api/voyage/:id', async (req, res) => {
   try {
-    const { voyage_id } = req.params;
-    
-    const position = await calculerPositionActuelle(voyage_id);
-    
-    if (!position) {
-      return res.status(404).json({ error: 'Voyage non trouvé' });
-    }
-    
-    res.json({
-      success: true,
-      data: position
-    });
-    
-  } catch (error) {
-    console.error('Erreur calcul position:', error);
-    res.status(500).json({ error: 'Erreur lors du calcul de position' });
-  }
-});
-
-/**
- * GET /api/tracking/:tracking_id/position
- * Même chose mais avec le tracking_id (public)
- */
-app.get('/api/tracking/:tracking_id/position', async (req, res) => {
-  try {
-    const { tracking_id } = req.params;
-    
     const result = await pool.query(
-      `SELECT voyage_id FROM voyages WHERE tracking_id = $1`,
-      [tracking_id]
+      'DELETE FROM voyages WHERE voyage_id = $1 RETURNING *',
+      [req.params.id]
     );
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Tracking ID non trouvé' });
-    }
-    
-    const voyage_id = result.rows[0].voyage_id;
-    const position = await calculerPositionActuelle(voyage_id);
-    
-    res.json({
-      success: true,
-      data: position
-    });
-    
-  } catch (error) {
-    console.error('Erreur calcul position:', error);
-    res.status(500).json({ error: 'Erreur lors du calcul de position' });
-  }
-});
 
-/**
- * DELETE /api/voyages/:voyage_id
- * Supprimer un voyage
- */
-app.delete('/api/voyages/:voyage_id', async (req, res) => {
-  try {
-    const { voyage_id } = req.params;
-    
-    const result = await pool.query(
-      `DELETE FROM voyages WHERE voyage_id = $1 RETURNING voyage_id`,
-      [voyage_id]
-    );
-    
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Voyage non trouvé' });
     }
-    
-    res.json({
-      success: true,
-      message: 'Voyage supprimé'
-    });
-    
+
+    res.json({ message: 'Voyage supprimé', voyage: result.rows[0] });
   } catch (error) {
-    console.error('Erreur suppression voyage:', error);
-    res.status(500).json({ error: 'Erreur lors de la suppression' });
+    console.error('Erreur API DELETE /voyage/:id:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// ====================================
-// WEBSOCKET POUR LES MISES À JOUR EN TEMPS RÉEL
-// ====================================
+/**
+ * GET /api/health
+ * Vérifier l'état du serveur
+ */
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    database: 'Connected'
+  });
+});
+
+// =====================================
+// SOCKET.IO - Real-time updates
+// =====================================
 
 io.on('connection', (socket) => {
-  console.log(`Client connecté: ${socket.id}`);
-  
-  // Écouter les demandes de tracking
-  socket.on('subscribe_voyage', async (data) => {
-    const { voyage_id } = data;
-    socket.join(`voyage-${voyage_id}`);
-    console.log(`Client ${socket.id} s'abonne au voyage: ${voyage_id}`);
-    
-    // Envoyer la position immédiatement
-    const position = await calculerPositionActuelle(voyage_id);
-    if (position) {
-      socket.emit('position_update', position);
-    }
-  });
-  
-  socket.on('disconnect', () => {
-    console.log(`Client déconnecté: ${socket.id}`);
-  });
-});
+  console.log('✓ Client connecté:', socket.id);
 
-// Mettre à jour les positions tous les 10 secondes
-setInterval(async () => {
-  try {
-    const result = await pool.query(
-      `SELECT DISTINCT voyage_id FROM voyages WHERE status = 'active'`
-    );
-    
-    for (const { voyage_id } of result.rows) {
-      const position = await calculerPositionActuelle(voyage_id);
-      if (position) {
-        io.to(`voyage-${voyage_id}`).emit('position_update', position);
+  // Envoie la position actuelle au client
+  socket.on('get-position', async () => {
+    try {
+      const result = await pool.query(
+        `SELECT * FROM voyages WHERE departure_date <= NOW() AND arrival_date >= NOW() LIMIT 1`
+      );
+
+      if (result.rows.length > 0) {
+        const voyage = result.rows[0];
+        const progression = calculerProgression(voyage.departure_date, voyage.arrival_date);
+        const waypoints = voyageWaypoints['DAR-SHA'];
+        const position = interpolatePosition(progression, waypoints);
+
+        socket.emit('position-update', {
+          voyage_id: voyage.voyage_id,
+          position,
+          progress: Math.round(progression * 100),
+          timestamp: new Date().toISOString()
+        });
       }
+    } catch (error) {
+      console.error('Erreur Socket.io get-position:', error);
     }
-  } catch (error) {
-    console.error('Erreur mise à jour WebSocket:', error);
-  }
-}, 10000);
+  });
 
-// ====================================
-// DÉMARRER LE SERVEUR
-// ====================================
-// GET /api/voyages/:voyageId/current-position
-app.get('/api/voyages/:voyageId/current-position', async (req, res) => {
-  try {
-    const { voyageId } = req.params;
-    const voyageResult = await pool.query('SELECT * FROM voyages WHERE voyage_id = $1', [voyageId]);
-    if (voyageResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Voyage non trouvé' });
-    }
-    const voyage = voyageResult.rows[0];
-    const now = new Date();
-    const departureDate = new Date(voyage.departure_date);
-    const arrivalDate = new Date(voyage.arrival_date);
-    const totalMs = arrivalDate - departureDate;
-    const elapsedMs = now - departureDate;
-    const progress = Math.max(0, Math.min(1, elapsedMs / totalMs));
-    const currentLat = parseFloat(voyage.departure_lat) + (parseFloat(voyage.arrival_lat) - parseFloat(voyage.departure_lat)) * progress;
-    const currentLon = parseFloat(voyage.departure_lon) + (parseFloat(voyage.arrival_lon) - parseFloat(voyage.departure_lon)) * progress;
-    res.json({
-      success: true,
-      voyage_id: voyage.voyage_id,
-      tracking_id: voyage.tracking_id,
-      name: voyage.name,
-      current_position: { latitude: currentLat, longitude: currentLon, progress_percent: Math.round(progress * 100) },
-      departure: { port: voyage.departure_port, lat: voyage.departure_lat, lon: voyage.departure_lon, date: voyage.departure_date },
-      arrival: { port: voyage.arrival_port, lat: voyage.arrival_lat, lon: voyage.arrival_lon, date: voyage.arrival_date }
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  socket.on('disconnect', () => {
+    console.log('✗ Client déconnecté:', socket.id);
+  });
 });
+
+// =====================================
+// DÉMARRAGE DU SERVEUR
+// =====================================
+
 const PORT = process.env.PORT || 5000;
 
 server.listen(PORT, () => {
-  console.log(`🚀 Serveur CECOOS démarré sur le port ${PORT}`);
-  console.log(`📍 Backend: http://localhost:${PORT}`);
-  console.log(`📍 Health: http://localhost:${PORT}/health`);
-  console.log(`🗄️  Base de données: ${process.env.DB_HOST || 'localhost'}`);
+  console.log('================================================');
+  console.log('🚢 CECOOS TRACKING MARITIME - BACKEND V2');
+  console.log('================================================');
+  console.log(`✅ Serveur CECOOS démarré sur le port ${PORT}`);
+  console.log(`✅ Backend: http://localhost:${PORT}`);
+  console.log(`✅ Health: http://localhost:${PORT}/api/health`);
+  console.log('================================================');
 });
 
-// Gestion des erreurs non capturées
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Promise rejetée:', reason);
-});
+// =====================================
+// EXPORT (pour tests)
+// =====================================
+
+module.exports = { app, server, pool };
