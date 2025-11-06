@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CECOOS - Tracking Maritime</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', sans-serif; background: #f5f5f5; }
+        .container { display: flex; height: 100vh; }
+        #map { flex: 1; }
+        .sidebar { width: 350px; background: white; padding: 20px; overflow-y: auto; box-shadow: -2px 0 10px rgba(0,0,0,0.1); }
+        h1 { color: #0066cc; margin-bottom: 20px; }
+        .info-section { margin-bottom: 25px; }
+        .info-section h3 { font-size: 14px; font-weight: 600; text-transform: uppercase; margin-bottom: 10px; color: #666; }
+        .info-item { margin-bottom: 8px; padding: 8px; background: #f9f9f9; border-left: 3px solid #0066cc; }
+        .info-item .label { font-weight: 600; color: #333; font-size: 13px; }
+        .info-item .value { color: #666; font-size: 12px; }
+        .progress-bar { width: 100%; height: 8px; background: #e0e0e0; border-radius: 4px; overflow: hidden; margin: 10px 0; }
+        .progress-fill { height: 100%; background: linear-gradient(90deg, #0066cc, #00ccff); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="map"></div>
+        <div class="sidebar">
+            <h1>⛴️ CECOOS Tracking</h1>
+            <div id="info">Chargement...</div>
+        </div>
+    </div>
+
+    <script>
+        const map = L.map('map').setView([10, 70], 4);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap', maxZoom: 19
+        }).addTo(map);
+
+        const portIcon = L.icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png', iconSize: [25, 41] });
+        const shipIcon = L.icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png', iconSize: [25, 41] });
+        const arrivalIcon = L.icon({ iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png', iconSize: [25, 41] });
+
+        async function updateTracking() {
+            try {
+                const response = await fetch('/api/voyages/VOYAGE-001/current-position');
+                const data = await response.json();
+                const { current_position, departure, arrival, name } = data;
+                const progress = current_position.progress_percent;
+
+                L.marker([departure.lat, departure.lon], { icon: portIcon }).addTo(map).bindPopup(departure.port);
+                L.marker([arrival.lat, arrival.lon], { icon: arrivalIcon }).addTo(map).bindPopup(arrival.port);
+                L.marker([current_position.latitude, current_position.longitude], { icon: shipIcon }).addTo(map).bindPopup(`${name} - ${progress}%`);
+                L.polyline([[departure.lat, departure.lon], [current_position.latitude, current_position.longitude], [arrival.lat, arrival.lon]], { color: '#0066cc', weight: 3 }).addTo(map);
+
+                map.fitBounds([[departure.lat, departure.lon], [arrival.lat, arrival.lon]], { padding: [50, 50] });
+
+                document.getElementById('info').innerHTML = `
+                    <div class="info-section">
+                        <h3>Voyage: ${name}</h3>
+                        <div class="info-item"><div class="label">Statut</div><div class="value">En transit</div></div>
+                    </div>
+                    <div class="info-section">
+                        <h3>Progression</h3>
+                        <div class="progress-bar"><div class="progress-fill" style="width: ${progress}%"></div></div>
+                        <div class="info-item"><div class="label">Avancement</div><div class="value">${progress}%</div></div>
+                    </div>
+                    <div class="info-section">
+                        <h3>Position</h3>
+                        <div class="info-item"><div class="label">Lat</div><div class="value">${current_position.latitude.toFixed(4)}°</div></div>
+                        <div class="info-item"><div class="label">Lon</div><div class="value">${current_position.longitude.toFixed(4)}°</div></div>
+                    </div>
+                    <div class="info-section">
+                        <h3>Départ</h3>
+                        <div class="info-item"><div class="value">${departure.port}</div></div>
+                    </div>
+                    <div class="info-section">
+                        <h3>Destination</h3>
+                        <div class="info-item"><div class="value">${arrival.port}</div></div>
+                    </div>
+                `;
+            } catch (error) {
+                document.getElementById('info').innerHTML = `<div style="color: red;">Erreur: ${error.message}</div>`;
+            }
+        }
+
+        updateTracking();
+        setInterval(updateTracking, 10000);
+    </script>
+</body>
+</html>
